@@ -1,12 +1,15 @@
 module Main exposing (..)
 
 import Html exposing (..)
+import Html.Attributes as HtmlAttr exposing (..)
 import Svg exposing (..)
-import Svg.Attributes exposing (..)
+import Svg.Attributes as SvgAttr exposing (..)
 import Random
 import Random.Float
 import Time exposing (..)
 import Collision
+import Task
+import Window
 
 
 main : Program Never Model Msg
@@ -23,7 +26,8 @@ type alias Model =
     { drawLength : Distribution
     , updateInterval : Maybe Time
     , drawing : Drawing
-    , boundaries : List Collision.Boundary
+    , size : Window.Size
+    , timing : Timing
     }
 
 
@@ -38,89 +42,84 @@ type alias Drawing =
     }
 
 
-type alias Box =
-    { left : Float
-    , top : Float
-    , right : Float
-    , bottom : Float
+type alias Timing =
+    { last : Float
+    , delta : Float
     }
 
 
 type Msg
     = Tick Time
     | NewLine ( Float, Float )
+    | Resize Window.Size
 
 
 init : ( Model, Cmd Msg )
 init =
     Model (Distribution 0.0 20.0)
-        (Just millisecond)
+        (Just 33.3)
         (Drawing [ ( 0.0, 0.0 ) ])
-        (Collision.boundaries 640.0 480.0)
-        ! []
+        (Window.Size 640 480)
+        (Timing 0.0 300.0)
+        ! [ Task.perform Resize Window.size ]
 
 
 subscriptions : Model -> Sub Msg
 subscriptions model =
-    case model.updateInterval of
-        Just time ->
-            every time Tick
+    let
+        subs =
+            case model.updateInterval of
+                Just time ->
+                    [ every time Tick ]
 
-        Nothing ->
-            Sub.none
+                Nothing ->
+                    []
+
+        withSize =
+            (Window.resizes Resize) :: subs
+    in
+        Sub.batch withSize
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
-        Tick _ ->
-            model ! [ Random.generate NewLine <| newLineGenerator model.drawLength ]
-
-        NewLine (dx, dy) ->
-            { model | drawing = updateDrawing (dx, dy) model } ! []
-
-
-updateDrawing : (Float, Float) -> Model -> Drawing
-updateDrawing (dx, dy) { drawing, boundaries }  =
-    case drawing.points of
-        (x, y) :: tail ->
+        Tick time ->
             let
-                newPoints = (x + dx, y + dy) :: (x, y) :: tail
+                delta =
+                    time - model.timing.last
+
+                newDelta =
+                    0.05 * delta + 0.95 * model.timing.delta
+
+                timing =
+                    Timing time newDelta
             in
-                { drawing | points = Collision.update boundaries newPoints  }
+                { model | timing = timing }
+                    ! [ Random.generate NewLine <| newLineGenerator model.drawLength ]
+
+        NewLine ( dx, dy ) ->
+            { model | drawing = updateDrawing ( dx, dy ) model } ! []
+
+        Resize size ->
+            { model | size = size } ! []
+
+
+updateDrawing : ( Float, Float ) -> Model -> Drawing
+updateDrawing ( dx, dy ) { drawing, size } =
+    case drawing.points of
+        ( x, y ) :: tail ->
+            let
+                boundaries =
+                    Collision.boundaries (toFloat size.width) (toFloat size.height)
+
+                newPoints =
+                    ( x + dx, y + dy ) :: ( x, y ) :: tail
+            in
+                { drawing | points = Collision.update boundaries newPoints }
 
         [] ->
             drawing
-
-
-updateBBox : ( Float, Float ) -> Box -> Box
-updateBBox ( x, y ) bbox =
-    let
-        left =
-            if x < bbox.left then
-                x
-            else
-                bbox.left
-
-        top =
-            if y < bbox.top then
-                y
-            else
-                bbox.top
-
-        right =
-            if x > bbox.right then
-                x
-            else
-                bbox.right
-
-        bottom =
-            if y > bbox.bottom then
-                y
-            else
-                bbox.bottom
-    in
-        Box left top right bottom
 
 
 newLineGenerator : Distribution -> Random.Generator ( Float, Float )
@@ -133,48 +132,81 @@ newLineGenerator { stddev, mean } =
 
 
 view : Model -> Html Msg
-view { drawing } =
-    svg
-        [ width "640"
-        , height "480"
-        , viewBox "-320 -240 640 480"
-        ] <| viewLines drawing
+view model =
+    div [ HtmlAttr.style [ ( "position", "relative" ) ] ]
+        [ viewSvg model
+        , fpsCounter model
+        ]
 
-bounds : Box -> String
-bounds { left, top, right, bottom } =
+
+viewSvg : Model -> Html Msg
+viewSvg model =
+    div [ HtmlAttr.style [ ( "position", "relative" ) ] ]
+        [ svg
+            [ SvgAttr.width <| toString model.size.width
+            , SvgAttr.height <| toString model.size.height
+            , viewBox <| bounds model.size
+            ]
+          <|
+            viewLines model
+        ]
+
+
+bounds : Window.Size -> String
+bounds { width, height } =
     let
-        width =
-            right - left
+        left =
+            -width // 2
 
-        height =
-            bottom - top
+        top =
+            -height // 2
     in
         [ left, top, width, height ]
             |> List.map toString
             |> String.join " "
 
 
-viewLines : Drawing -> List (Html Msg)
-viewLines { points } =
+fpsCounter : Model -> Html Msg
+fpsCounter { timing, size } =
+    let
+        fps =
+            toFloat (round (100000.0 / timing.delta)) / 100.0
+    in
+        div
+            [ HtmlAttr.style
+                [ ( "position", "absolute" )
+                , ( "left", "0" )
+                , ( "bottom", "10px" )
+                , ( "font-size", "72px" )
+                , ( "background", "rgba(1,1,1,0.5)" )
+                , ( "color", "lightgray" )
+                , ( "padding", "10px" )
+                ]
+            ]
+            [ Html.text (toString fps) ]
+
+
+viewLines : Model -> List (Html Msg)
+viewLines model =
     let
         mkLine ( x2, y2 ) ( ( x1, y1 ), output ) =
             let
                 elem =
                     line
-                        [ Svg.Attributes.x1 (toString x1)
-                        , Svg.Attributes.y1 (toString y1)
-                        , Svg.Attributes.x2 (toString x2)
-                        , Svg.Attributes.y2 (toString y2)
-                        , Svg.Attributes.fill "none"
-                        , Svg.Attributes.stroke "black"
-                        , Svg.Attributes.strokeWidth "2"
-                        , Svg.Attributes.strokeLinecap "round"
+                        [ SvgAttr.x1 (toString x1)
+                        , SvgAttr.y1 (toString y1)
+                        , SvgAttr.x2 (toString x2)
+                        , SvgAttr.y2 (toString y2)
+                        , SvgAttr.fill "none"
+                        , SvgAttr.stroke "black"
+                        , SvgAttr.strokeWidth "2"
+                        , SvgAttr.strokeLinecap "round"
                         ]
                         []
             in
                 ( ( x2, y2 ), elem :: output )
     in
-        case points of
+        case model.drawing.points of
             head :: tail ->
                 Tuple.second <| List.foldl mkLine ( head, [] ) tail
 
